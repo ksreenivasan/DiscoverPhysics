@@ -3,6 +3,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](#license)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg?style=for-the-badge&logo=python&logoColor=white)](https://github.com/psf/black)
 [![Tests](https://img.shields.io/github/actions/workflow/status/SampsonML/DiscoverPhysics/tests.yml?branch=main&style=for-the-badge&label=tests)](https://github.com/SampsonML/DiscoverPhysics/actions/workflows/tests.yml)
+
+> **Public-world evaluation branch:** the added multi-provider harness uses only the world definitions already published in this GitHub repository. Gated private worlds, laws, and rubrics have never been downloaded or used. Raw evaluation artifacts and generated laws remain outside Git. See [the implementation audit](docs/IMPLEMENTATION_AUDIT.md) and [full-run preparation runbook](docs/FULL_RUN_RUNBOOK.md).
+
 ## Benchmarking routine for scientific discovery agents.
 
 ![Agent pipeline diagram](imgs/agent_pipeline_diagram-1.png)

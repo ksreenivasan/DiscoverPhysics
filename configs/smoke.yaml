@@ -1,0 +1,20 @@
+protocol_id: discoverphysics-smoke-v0
+phase: smoke
+max_rounds: 2
+max_tokens: 16384
+noise_frac: 0.05
+worlds: [gravity]
+seeds: [0]
+lanes:
+  - label: gpt-5.6-sol-high
+    model_id: gpt-5.6-sol
+    provider: openai
+  - label: claude-opus-5-high
+    model_id: claude-opus-5
+    provider: anthropic
+  - label: gemini-3.7-flash-high
+    model_id: gemini-3.7-flash
+    provider: google
+  - label: qwen3.5-397b-a17b-high-openrouter
+    model_id: qwen/qwen3.5-397b-a17b
+    provider: openrouter

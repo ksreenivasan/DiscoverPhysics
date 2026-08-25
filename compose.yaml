@@ -1,0 +1,65 @@
+name: discoverphysics-public-harness
+
+services:
+  law-sandbox:
+    build:
+      context: .
+    image: discoverphysics-public-harness:local
+    container_name: discoverphysics-public-harness-law-sandbox
+    command: ["sandbox-worker", "--ipc-root", "/ipc"]
+    network_mode: none
+    read_only: true
+    user: "10001:10001"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 6g
+    cpus: 4
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=2g
+    volumes:
+      - dp-ipc:/ipc
+      - ${DP_ARTIFACT_ROOT:-../discoverphysics-runs}:/artifacts:ro
+    restart: "no"
+
+  runner:
+    build:
+      context: .
+    image: discoverphysics-public-harness:local
+    depends_on:
+      - law-sandbox
+    read_only: true
+    user: "10001:10001"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 512
+    mem_limit: 12g
+    cpus: 8
+    tmpfs:
+      - /tmp:rw,nosuid,size=4g
+    environment:
+      DP_IPC_ROOT: /ipc
+      DP_ARTIFACT_ROOT: /artifacts
+      OPENROUTER_PROVIDER: ${OPENROUTER_PROVIDER:-}
+    secrets:
+      - openai_api_key
+      - anthropic_api_key
+      - gemini_api_key
+      - openrouter_api_key
+    volumes:
+      - dp-ipc:/ipc
+      - ${DP_ARTIFACT_ROOT:-../discoverphysics-runs}:/artifacts:rw
+
+volumes:
+  dp-ipc:
+    name: discoverphysics-public-harness-ipc
+
+secrets:
+  openai_api_key:
+    file: ${HOME}/secrets_and_keys/openai.key
+  anthropic_api_key:
+    file: ${HOME}/secrets_and_keys/anthropic.key
+  gemini_api_key:
+    file: ${HOME}/secrets_and_keys/gemini.key
+  openrouter_api_key:
+    file: ${HOME}/secrets_and_keys/openrouter.key

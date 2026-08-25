@@ -1,0 +1,35 @@
+protocol_id: discoverphysics-public-pilot-v0
+phase: public-pilot
+label: Public-Pilot-4
+max_rounds: 16
+max_tokens: 16384
+noise_frac: 0.05
+worlds: [gravity, oscillator, extra_dimensions, dark_matter]
+seeds: [0, 1, 2, 3, 4]
+lanes:
+  - label: gpt-5.6-sol-high
+    model_id: gpt-5.6-sol
+    provider: openai
+  - label: claude-opus-5-high
+    model_id: claude-opus-5
+    provider: anthropic
+  - label: gemini-3.7-flash-high
+    model_id: gemini-3.7-flash
+    provider: google
+  - label: qwen3.5-397b-a17b-high-openrouter
+    model_id: qwen/qwen3.5-397b-a17b
+    provider: openrouter
+fallbacks:
+  - label: glm-5.1-high-openrouter
+    model_id: z-ai/glm-5.1
+    provider: openrouter
+  - label: nemotron-3-ultra-high-openrouter
+    model_id: nvidia/nemotron-3-ultra-550b-a55b
+    provider: openrouter
+judge:
+  model_id: claude-opus-4-6
+  provider: anthropic
+  max_tokens: 1024
+thresholds:
+  normalized_mse_lt: 0.1
+  explanation_gte: 0.9
