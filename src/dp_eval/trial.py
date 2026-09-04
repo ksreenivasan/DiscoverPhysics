@@ -18,6 +18,7 @@ WORLD_VARS = {
     "oscillator": 6.332,
     "extra_dimensions": 4.248,
     "dark_matter": 63.303,
+    "three_species": 28.717,
 }
 
 
