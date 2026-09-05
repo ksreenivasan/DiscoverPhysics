@@ -12,6 +12,7 @@ HIGH_REASONING_MODELS = {
     "gpt-5.6-sol",
     "claude-opus-5",
     "gemini-3.7-flash",
+    "gemini-3.8-flash",
     "qwen/qwen3.5-397b-a17b",
     "z-ai/glm-5.1",
     "nvidia/nemotron-3-ultra-550b-a55b",
@@ -65,9 +66,16 @@ def available_credentials() -> dict[str, bool]:
 
 
 class Adapter:
-    def __init__(self, usage_path: Path | None = None):
+    def __init__(
+        self,
+        usage_path: Path | None = None,
+        endpoint_config: dict[str, Any] | None = None,
+    ):
         load_runtime_secrets()
         self.usage_path = usage_path
+        self.endpoint_config = endpoint_config
+        if endpoint_config is not None:
+            _validate_endpoint_config(endpoint_config)
 
     def complete(
         self,
@@ -76,6 +84,8 @@ class Adapter:
         system: Optional[str] = None,
         max_tokens: int = 4096,
     ) -> str:
+        if self.endpoint_config and model == self.endpoint_config["model_id"]:
+            return self._openai_compatible(model, messages, system, max_tokens)
         if model.startswith("openrouter/"):
             return self._openrouter(model.removeprefix("openrouter/"), messages, system, max_tokens)
         if model in {"qwen/qwen3.5-397b-a17b", "z-ai/glm-5.1", "nvidia/nemotron-3-ultra-550b-a55b"}:
@@ -87,6 +97,100 @@ class Adapter:
         if model.startswith("gpt-") or model.startswith("o"):
             return self._openai(model, messages, system, max_tokens)
         raise ValueError(f"Unsupported model ID: {model}")
+
+    def endpoint_canary(self) -> dict[str, Any] | None:
+        if self.endpoint_config is None:
+            return None
+        import requests
+
+        config = self.endpoint_config
+        key = _endpoint_key(config)
+        headers = {"Authorization": f"Bearer {key}"}
+        response = requests.get(
+            f"{_endpoint_base_url(config)}/models",
+            headers=headers,
+            timeout=float(config.get("canary_timeout_seconds", 30)),
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"endpoint model catalog HTTP {response.status_code}: "
+                f"{_safe_provider_error(response, [key])}"
+            )
+        ids = {item.get("id") for item in response.json().get("data", [])}
+        if config["model_id"] not in ids:
+            raise RuntimeError(
+                f"served model {config['model_id']!r} is absent from the endpoint model catalog"
+            )
+        text = self._openai_compatible(
+            config["model_id"],
+            [{"role": "user", "content": "Reply with OK."}],
+            None,
+            int(config.get("canary_max_tokens", 32)),
+        )
+        if not text:
+            raise RuntimeError("endpoint inference canary returned no text")
+        return {
+            "model_id": config["model_id"],
+            "catalog": "passed",
+            "inference": "passed",
+        }
+
+    def _openai_compatible(
+        self,
+        model: str,
+        messages: list[dict],
+        system: Optional[str],
+        max_tokens: int,
+    ) -> str:
+        config = self.endpoint_config
+        if config is None:
+            raise RuntimeError("endpoint configuration is missing")
+        full = ([{"role": "system", "content": system}] if system else []) + messages
+        full = _apply_reasoning_history(full, config["reasoning_history"])
+        payload: dict[str, Any] = dict(config.get("request_parameters") or {})
+        payload.update({"model": model, "messages": full, "max_tokens": max_tokens})
+        key = _endpoint_key(config)
+        started = time.monotonic()
+        response = _request_with_retries(
+            f"{_endpoint_base_url(config)}/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            payload=payload,
+            secret_values=[key],
+        )
+        latency = int((time.monotonic() - started) * 1000)
+        body = response.json()
+        choice = (body.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        text = _content_text(
+            message.get("content")
+            or message.get("reasoning_content")
+            or message.get("reasoning")
+        )
+        usage = body.get("usage") or {}
+        details = usage.get("completion_tokens_details") or {}
+        response_model = body.get("model")
+        _require_exact_model(model, response_model)
+        requested = config.get("reasoning_effort")
+        self._write_usage(
+            UsageRecord(
+                timestamp_utc=_utc_now(), call_role="solver", model=model,
+                provider="openai_compatible", requested_reasoning=requested,
+                effective_reasoning=requested,
+                input_tokens=usage.get("prompt_tokens"),
+                cached_input_tokens=(usage.get("prompt_tokens_details") or {}).get(
+                    "cached_tokens"
+                ),
+                output_tokens=usage.get("completion_tokens"),
+                reasoning_tokens=details.get("reasoning_tokens"), latency_ms=latency,
+                finish_reason=choice.get("finish_reason"),
+                request_id=body.get("id"),
+                retry_count=int(response.headers.get("x-dp-retries", "0")),
+                response_model=response_model, model_identity_verified=True,
+                reasoning_setting_verified=True,
+                provider_backend=_endpoint_base_url(config),
+            )
+        )
+        return text
 
     def _write_usage(self, record: UsageRecord) -> None:
         if self.usage_path is None:
@@ -258,7 +362,12 @@ class Adapter:
         return text
 
 
-def _request_with_retries(url: str, headers: dict, payload: dict):
+def _request_with_retries(
+    url: str,
+    headers: dict,
+    payload: dict,
+    secret_values: list[str] | None = None,
+):
     import requests
 
     last: Exception | None = None
@@ -268,7 +377,7 @@ def _request_with_retries(url: str, headers: dict, payload: dict):
             if response.status_code < 400:
                 response.headers["x-dp-retries"] = str(attempt)
                 return response
-            detail = _safe_provider_error(response)
+            detail = _safe_provider_error(response, secret_values)
             if response.status_code not in {408, 429} and response.status_code < 500:
                 raise RuntimeError(f"provider HTTP {response.status_code}: {detail}")
             last = RuntimeError(f"provider HTTP {response.status_code}: {detail}")
@@ -279,13 +388,53 @@ def _request_with_retries(url: str, headers: dict, payload: dict):
     raise RuntimeError(f"Provider request failed after retries: {last}")
 
 
-def _safe_provider_error(response) -> str:
+def _safe_provider_error(response, secret_values: list[str] | None = None) -> str:
     detail = response.text[:500].replace("\n", " ")
-    for name in _SECRET_FILES:
-        value = os.environ.get(name)
+    values = [os.environ.get(name) for name in _SECRET_FILES]
+    values.extend(secret_values or [])
+    for value in values:
         if value:
             detail = detail.replace(value, "[REDACTED]")
     return detail
+
+
+def _validate_endpoint_config(config: dict[str, Any]) -> None:
+    for field in ("model_id", "base_url", "api_key_env", "reasoning_history"):
+        if not isinstance(config.get(field), str) or not config[field].strip():
+            raise ValueError(f"openai_compatible requires an explicit {field}")
+    if config["reasoning_history"] not in {"none", "preserve", "empty"}:
+        raise ValueError(
+            "openai_compatible reasoning_history must be one of: none, preserve, empty"
+        )
+
+
+def _endpoint_base_url(config: dict[str, Any]) -> str:
+    return str(config["base_url"]).rstrip("/")
+
+
+def _endpoint_key(config: dict[str, Any]) -> str:
+    variable = config["api_key_env"]
+    value = os.environ.get(variable, "").strip()
+    if not value:
+        raise RuntimeError(f"required runtime environment variable {variable} is not set")
+    return value
+
+
+def _apply_reasoning_history(messages: list[dict], policy: str) -> list[dict]:
+    reasoning_fields = {
+        "reasoning_content", "reasoning", "think", "think_fast", "think_faster"
+    }
+    if policy == "preserve":
+        return [dict(message) for message in messages]
+    if policy == "none":
+        return [
+            {key: value for key, value in message.items() if key not in reasoning_fields}
+            for message in messages
+        ]
+    return [
+        ({**message, "reasoning_content": ""} if message.get("role") == "assistant" else dict(message))
+        for message in messages
+    ]
 
 
 def _call_role(model: str) -> str:

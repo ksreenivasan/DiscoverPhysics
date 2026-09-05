@@ -12,6 +12,7 @@ class ResumeTests(unittest.TestCase):
         self.assertTrue(_retryable_infrastructure_failure(row))
         self.assertTrue(_retryable_infrastructure_failure({"error": {"type": "ChunkedEncodingError", "message": "Response ended prematurely"}}))
         self.assertTrue(_retryable_infrastructure_failure({"error": {"type": "RuntimeError", "message": "RemoteDisconnected"}}))
+        self.assertTrue(_retryable_infrastructure_failure({"error": {"type": "ItemTimeout", "message": "bounded timeout"}}))
         self.assertFalse(_retryable_infrastructure_failure({"error": {"type": "ValueError", "message": "bad law"}}))
 
     def test_invalid_attempt_is_preserved_without_nesting_old_attempts(self):

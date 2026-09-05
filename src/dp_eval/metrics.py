@@ -21,9 +21,36 @@ PRICES_PER_MILLION = {
 def aggregate(run_dir: Path, label: str = "Public-Pilot-4") -> dict[str, Any]:
     trials = []
     for path in sorted((run_dir / "raw").glob("*/*/seed-*/trial.json")):
-        trials.append(json.loads(path.read_text()))
-    if not trials:
+        row = json.loads(path.read_text())
+        row.setdefault(
+            "item_key",
+            f"{_safe(row['lane'])}/{row['world']}/seed-{int(row['seed'])}",
+        )
+        trials.append(row)
+    manifest_path = run_dir / "manifest.json"
+    manifest = (
+        json.loads(manifest_path.read_text())
+        if manifest_path.exists()
+        else {"trial_count": len(trials), "items": []}
+    )
+    expected_items = manifest.get("items") or []
+    if not trials and not expected_items:
         raise ValueError(f"no trial.json files under {run_dir / 'raw'}")
+    observed = {row["item_key"]: row for row in trials}
+    if len(observed) != len(trials):
+        raise ValueError("duplicate deterministic item keys in trial artifacts")
+    missing_items = [item for item in expected_items if item["item_key"] not in observed]
+    for item in missing_items:
+        trials.append(
+            {
+                **item,
+                "status": "unresolved",
+                "error": {
+                    "type": "MissingArtifact",
+                    "message": "manifest item has no trial artifact and remains retryable",
+                },
+            }
+        )
 
     by_lane: dict[str, list[dict]] = defaultdict(list)
     for row in trials:
@@ -40,6 +67,13 @@ def aggregate(run_dir: Path, label: str = "Public-Pilot-4") -> dict[str, Any]:
         "worlds": sorted({row["world"] for row in trials}),
         "seeds": sorted({row["seed"] for row in trials}),
         "trial_count": len(trials),
+        "manifest_trial_count": int(manifest.get("trial_count", len(trials))),
+        "persisted_trial_count": len(observed),
+        "unresolved_missing_items": [item["item_key"] for item in missing_items],
+        "run_complete": not missing_items,
+        "all_items_scored": not missing_items and all(
+            row.get("status") == "completed" for row in trials
+        ),
         "lanes": lane_results,
     }
     aggregate_dir = run_dir / "aggregate"
@@ -134,7 +168,8 @@ def render_markdown(result: dict[str, Any]) -> str:
         f"Run: `{result['run_id']}`  ",
         f"Generated: {result['generated_utc']}  ",
         f"Worlds: {', '.join(result['worlds'])}  ",
-        f"Seeds: {', '.join(map(str, result['seeds']))}",
+        f"Seeds: {', '.join(map(str, result['seeds']))}  ",
+        f"Manifest accounted: **{result['run_complete']}**; all items scored: **{result['all_items_scored']}**",
         "",
         "> Internal stratified public pilot; not an official 22-world DiscoverPhysics score.",
         "",
@@ -170,6 +205,10 @@ def render_markdown(result: dict[str, Any]) -> str:
         "- Spend is estimated from recorded token usage and the execution-day catalog snapshot; provider billing is authoritative.",
     ]
     return "\n".join(lines) + "\n"
+
+
+def _safe(value: str) -> str:
+    return "".join(c if c.isalnum() or c in "_.-" else "_" for c in value)
 
 
 def _fmt_list(values: list[Any]) -> str:

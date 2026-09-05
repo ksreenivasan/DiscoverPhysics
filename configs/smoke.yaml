@@ -2,6 +2,7 @@ protocol_id: discoverphysics-smoke-v0
 phase: smoke
 max_rounds: 2
 max_tokens: 16384
+item_timeout_seconds: 1800
 noise_frac: 0.05
 worlds: [gravity]
 seeds: [0]

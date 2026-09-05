@@ -3,6 +3,7 @@ phase: public-pilot
 label: Public-Pilot-4
 max_rounds: 16
 max_tokens: 16384
+item_timeout_seconds: 7200
 noise_frac: 0.05
 worlds: [gravity, oscillator, extra_dimensions, dark_matter]
 seeds: [0, 1, 2, 3, 4]

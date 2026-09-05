@@ -31,7 +31,7 @@ def run_trial(spec: dict[str, Any]) -> dict[str, Any]:
     trial_dir = artifact_root / run_id / "raw" / _safe(lane) / world_name / f"seed-{seed}"
     trial_dir.mkdir(parents=True, exist_ok=True)
     usage_path = trial_dir / "usage.jsonl"
-    adapter = Adapter(usage_path)
+    adapter = Adapter(usage_path, endpoint_config=spec.get("endpoint_config"))
     started = _utc_now()
 
     try:
@@ -48,6 +48,7 @@ def run_trial(spec: dict[str, Any]) -> dict[str, Any]:
         "schema_version": 1,
         "run_id": run_id,
         "phase": spec["phase"],
+        "item_key": f"{_safe(lane)}/{world_name}/seed-{seed}",
         "lane": lane,
         "model_id": spec["model_id"],
         "provider": spec["provider"],
@@ -61,6 +62,7 @@ def run_trial(spec: dict[str, Any]) -> dict[str, Any]:
         "finished_utc": _utc_now(),
         "max_rounds": spec["max_rounds"],
         "max_tokens": spec["max_tokens"],
+        "item_timeout_seconds": spec.get("item_timeout_seconds"),
         "engine": "nbody",
         "noise_frac": spec["noise_frac"],
         "noise_std": spec["noise_frac"] * math.sqrt(WORLD_VARS[world_name]),
@@ -167,9 +169,15 @@ def _run_trial_inner(spec: dict[str, Any], trial_dir: Path, adapter: Adapter) ->
     }
 
 
-def canary(model_id: str, provider: str, output_dir: Path) -> dict[str, Any]:
+def canary(
+    model_id: str,
+    provider: str,
+    output_dir: Path,
+    endpoint_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    adapter = Adapter(output_dir / "usage.jsonl")
+    adapter = Adapter(output_dir / "usage.jsonl", endpoint_config=endpoint_config)
+    endpoint_result = adapter.endpoint_canary()
     reply = adapter.complete(
         model=model_id,
         system="You are testing the DiscoverPhysics action protocol. Follow the requested XML format exactly.",
@@ -186,6 +194,7 @@ def canary(model_id: str, provider: str, output_dir: Path) -> dict[str, Any]:
         "reply_sha256": _hash_text(reply),
         "reply_chars": len(reply),
         "timestamp_utc": _utc_now(),
+        "endpoint_canary": endpoint_result,
     }
     (output_dir / "canary.json").write_text(json.dumps(result, indent=2))
     return result

@@ -44,6 +44,27 @@ The pinned `WORLDS` registry contains an additional `wave` source entry. The pap
 
 Pinned dependency versions in `requirements.txt` are local environment choices, not official benchmark pins. The base image used for the pilot is `python:3.11-slim-bookworm` at digest `sha256:fe556eaffd0d96abd8685b83bb8a69addd0dc730fa193669a7df0d49ddcfac02`, running Linux ARM64.
 
+### OpenAI-compatible endpoint lanes
+
+An arbitrary OpenAI-compatible or vLLM deployment is configured as one lane; endpoint coordinates are never embedded in the adapter:
+
+```yaml
+lanes:
+  - label: served-model
+    provider: openai_compatible
+    model_id: exact-served-model-id
+    base_url: https://model-host.example/v1
+    api_key_env: SERVED_MODEL_API_KEY
+    reasoning_history: empty
+    request_parameters: {}
+```
+
+`base_url`, exact `model_id`, `api_key_env`, and `reasoning_history` (`none`, `preserve`, or `empty`) are mandatory. The named variable must hold either the real key or an explicit dummy token. The `empty` history policy carries forward the proven vLLM compatibility behavior by adding an empty `reasoning_content` to replayed assistant turns; `none` strips reasoning fields and `preserve` passes them through. Before `run` starts any trial, it requires the exact ID from `GET <base_url>/models` and a small successful Chat Completions inference.
+
+Native `gemini-3.8-flash` requests high thinking and sends only `maxOutputTokens` plus `thinkingConfig`; rejected legacy sampling parameters are not sent. Older model behavior is unchanged.
+
+Each protocol sets `item_timeout_seconds`. Every deterministic `lane/world/seed` trial runs in a separate bounded process, writes its result immediately, and is skipped only after a completed artifact exists. Exceptions and timeouts become explicit failed trial artifacts; retryable failures are preserved and retried on resume. Aggregation reconciles artifacts against manifest item keys and keeps failed or missing items in the denominator.
+
 ## What tools the evaluated model actually has
 
 ### Available to the solver

@@ -15,7 +15,7 @@ from typing import Any
 import requests
 import yaml
 
-from dp_eval.adapters import available_credentials, load_runtime_secrets
+from dp_eval.adapters import Adapter, available_credentials, load_runtime_secrets
 from dp_eval.metrics import aggregate
 from dp_eval.sandbox import SandboxClient, worker_loop
 from dp_eval.trial import canary, run_trial
@@ -43,6 +43,7 @@ def main() -> None:
 
     canaries = sub.add_parser("canaries")
     canaries.add_argument("--run-id", required=True)
+    canaries.add_argument("--config")
 
     full_prep = sub.add_parser("validate-full-prep")
     full_prep.add_argument("--config", required=True)
@@ -69,7 +70,7 @@ def main() -> None:
         if not result.get("ok"):
             raise SystemExit(1)
     elif args.command == "canaries":
-        result = run_canaries(args.run_id)
+        result = run_canaries(args.run_id, Path(args.config) if args.config else None)
         print(json.dumps(result, indent=2))
         if not result["ok"]:
             raise SystemExit(1)
@@ -218,13 +219,21 @@ def validate_full_prep(config_path: Path) -> dict[str, Any]:
     }
 
 
-def run_canaries(run_id: str) -> dict[str, Any]:
+def run_canaries(run_id: str, config_path: Path | None = None) -> dict[str, Any]:
     artifact_root = Path(os.environ.get("DP_ARTIFACT_ROOT", "/artifacts"))
+    if config_path:
+        cfg = yaml.safe_load(config_path.read_text())
+        models = [
+            (lane["model_id"], lane["provider"], _endpoint_config(lane))
+            for lane in cfg["lanes"]
+        ]
+    else:
+        models = [(model_id, provider, None) for model_id, provider in PRIMARY_MODELS]
     rows = []
-    for model_id, provider in PRIMARY_MODELS:
+    for model_id, provider, endpoint_config in models:
         output = artifact_root / run_id / "raw" / "canaries" / _safe(model_id)
         try:
-            row = canary(model_id, provider, output)
+            row = canary(model_id, provider, output, endpoint_config)
             row["status"] = "completed" if row["recognized_action"] else "malformed"
         except Exception as exc:
             row = {"model_id": model_id, "provider": provider, "status": "failed", **_safe_error(exc)}
@@ -238,6 +247,11 @@ def run_canaries(run_id: str) -> dict[str, Any]:
 
 def run_matrix(config_path: Path, run_id: str, max_concurrency: int) -> dict[str, Any]:
     cfg = yaml.safe_load(config_path.read_text())
+    for lane in cfg["lanes"]:
+        endpoint_config = _endpoint_config(lane)
+        if endpoint_config:
+            Adapter(endpoint_config=endpoint_config).endpoint_canary()
+            print(f"endpoint canary passed: {lane['label']}", flush=True)
     artifact_root = Path(os.environ.get("DP_ARTIFACT_ROOT", "/artifacts"))
     run_dir = artifact_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -271,6 +285,8 @@ def run_matrix(config_path: Path, run_id: str, max_concurrency: int) -> dict[str
                     "max_rounds": cfg["max_rounds"],
                     "max_tokens": cfg["max_tokens"],
                     "noise_frac": cfg["noise_frac"],
+                    "item_timeout_seconds": int(cfg.get("item_timeout_seconds", 7200)),
+                    "endpoint_config": _endpoint_config(lane),
                 })
     manifest = {
         "schema_version": 1,
@@ -280,8 +296,31 @@ def run_matrix(config_path: Path, run_id: str, max_concurrency: int) -> dict[str
         "protocol_sha256": protocol_hash,
         "upstream_commit": UPSTREAM_COMMIT,
         "trial_count": len(specs),
+        "items": [
+            {
+                "item_key": _item_key(spec),
+                "lane": spec["lane"],
+                "model_id": spec["model_id"],
+                "provider": spec["provider"],
+                "world": spec["world"],
+                "seed": spec["seed"],
+            }
+            for spec in specs
+        ],
         "requested_reasoning": "high",
         "openrouter_provider": os.environ.get("OPENROUTER_PROVIDER") or "auto",
+        "item_timeout_seconds": int(cfg.get("item_timeout_seconds", 7200)),
+        "endpoint_models": [
+            {
+                key: lane.get(key)
+                for key in (
+                    "model_id", "base_url", "api_key_env", "reasoning_history",
+                    "reasoning_effort", "request_parameters",
+                )
+            }
+            for lane in cfg["lanes"]
+            if _endpoint_config(lane)
+        ],
         "raw_artifacts_in_git": False,
     }
     if not manifest_path.exists():
@@ -289,7 +328,7 @@ def run_matrix(config_path: Path, run_id: str, max_concurrency: int) -> dict[str
 
     pending = []
     preserved_completed = 0
-    preserved_nonretryable = 0
+    preserved_failed_attempts = 0
     for spec in specs:
         trial_dir = _trial_dir(run_dir, spec)
         trial_path = trial_dir / "trial.json"
@@ -298,9 +337,7 @@ def run_matrix(config_path: Path, run_id: str, max_concurrency: int) -> dict[str
             if previous.get("status") == "completed":
                 preserved_completed += 1
                 continue
-            if not _retryable_infrastructure_failure(previous):
-                preserved_nonretryable += 1
-                continue
+            preserved_failed_attempts += 1
             _preserve_invalid_attempt(trial_dir)
         elif trial_dir.exists() and any(trial_dir.iterdir()):
             _preserve_invalid_attempt(trial_dir)
@@ -313,10 +350,12 @@ def run_matrix(config_path: Path, run_id: str, max_concurrency: int) -> dict[str
         "planned": len(specs),
         "scheduled_this_invocation": len(pending),
         "preserved_completed": preserved_completed,
-        "preserved_nonretryable_failures": preserved_nonretryable,
+        "preserved_failed_attempts": preserved_failed_attempts,
         "finalized": len(final_rows),
         "completed": sum(r["status"] == "completed" for r in final_rows),
-        "failed": sum(r["status"] != "completed" for r in final_rows),
+        "unresolved_missing": max(0, len(specs) - len(final_rows)),
+        "failed": sum(r["status"] != "completed" for r in final_rows)
+        + max(0, len(specs) - len(final_rows)),
         "run_dir": str(run_dir),
     }
     (run_dir / "run_summary.json").write_text(json.dumps(result, indent=2))
@@ -324,10 +363,10 @@ def run_matrix(config_path: Path, run_id: str, max_concurrency: int) -> dict[str
 
 
 def _run_isolated_processes(specs: list[dict[str, Any]], max_concurrency: int, run_dir: Path) -> None:
-    """Run each trial in its own process so one killed worker cannot break unrelated trials."""
+    """Run each trial in its own bounded process so failures cannot block other trials."""
     ctx = multiprocessing.get_context("spawn")
     waiting = iter(specs)
-    active: list[tuple[multiprocessing.Process, dict[str, Any]]] = []
+    active: list[tuple[multiprocessing.Process, dict[str, Any], float]] = []
     exhausted = False
     while active or not exhausted:
         while len(active) < max(1, max_concurrency) and not exhausted:
@@ -338,14 +377,32 @@ def _run_isolated_processes(specs: list[dict[str, Any]], max_concurrency: int, r
                 break
             process = ctx.Process(target=run_trial, args=(spec,))
             process.start()
-            active.append((process, spec))
-        for process, spec in list(active):
-            if process.is_alive():
+            active.append((process, spec, time.monotonic()))
+        for process, spec, started in list(active):
+            timed_out = (
+                process.is_alive()
+                and time.monotonic() - started >= spec["item_timeout_seconds"]
+            )
+            if process.is_alive() and not timed_out:
                 continue
+            if timed_out:
+                process.terminate()
+                process.join(timeout=10)
+                if process.is_alive():
+                    process.kill()
             process.join()
-            if process.exitcode != 0 and not (_trial_dir(run_dir, spec) / "trial.json").exists():
+            if timed_out:
+                _write_worker_exit(
+                    run_dir, spec, process.exitcode,
+                    error_type="ItemTimeout",
+                    message=(
+                        "trial exceeded configured item timeout of "
+                        f"{spec['item_timeout_seconds']} seconds"
+                    ),
+                )
+            elif process.exitcode != 0 and not (_trial_dir(run_dir, spec) / "trial.json").exists():
                 _write_worker_exit(run_dir, spec, process.exitcode)
-            active.remove((process, spec))
+            active.remove((process, spec, started))
         if active:
             time.sleep(0.2)
 
@@ -358,7 +415,9 @@ def _retryable_infrastructure_failure(row: dict[str, Any]) -> bool:
     error = row.get("error") or {}
     message = str(error.get("message") or "")
     return (
-        error.get("type") in {"WorkerExit", "ChunkedEncodingError", "ConnectionError"}
+        error.get("type") in {
+            "WorkerExit", "ItemTimeout", "ChunkedEncodingError", "ConnectionError"
+        }
         or "Provider request failed after retries" in message
         or "RemoteDisconnected" in message
     )
@@ -377,18 +436,39 @@ def _preserve_invalid_attempt(trial_dir: Path) -> None:
         child.rename(target / child.name)
 
 
-def _write_worker_exit(run_dir: Path, spec: dict[str, Any], exitcode: int | None) -> None:
+def _write_worker_exit(
+    run_dir: Path,
+    spec: dict[str, Any],
+    exitcode: int | None,
+    error_type: str = "WorkerExit",
+    message: str | None = None,
+) -> None:
     trial_dir = _trial_dir(run_dir, spec)
     trial_dir.mkdir(parents=True, exist_ok=True)
     row = {
         "schema_version": 1, "run_id": spec["run_id"], "phase": spec["phase"],
+        "item_key": _item_key(spec),
         "lane": spec["lane"], "model_id": spec["model_id"], "provider": spec["provider"],
         "provider_backend": spec.get("provider_backend"), "requested_reasoning": "high",
         "world": spec["world"], "world_visibility": "public", "seed": int(spec["seed"]),
         "status": "failed", "max_rounds": spec["max_rounds"], "max_tokens": spec["max_tokens"],
-        "error": {"type": "WorkerExit", "message": f"isolated trial process exited with code {exitcode}"},
+        "item_timeout_seconds": spec["item_timeout_seconds"],
+        "error": {
+            "type": error_type,
+            "message": message or f"isolated trial process exited with code {exitcode}",
+        },
     }
     (trial_dir / "trial.json").write_text(json.dumps(row, indent=2))
+
+
+def _item_key(spec: dict[str, Any]) -> str:
+    return f"{_safe(spec['lane'])}/{spec['world']}/seed-{int(spec['seed'])}"
+
+
+def _endpoint_config(lane: dict[str, Any]) -> dict[str, Any] | None:
+    if lane.get("provider") in {"openai_compatible", "vllm"}:
+        return lane
+    return None
 
 
 def _safe_error(exc: Exception) -> dict[str, Any]:
